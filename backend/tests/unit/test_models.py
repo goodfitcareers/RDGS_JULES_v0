@@ -1,7 +1,8 @@
 import pytest
 from uuid import UUID, uuid4
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timezone # MODIFIED: Ensured timezone is imported
 from typing import Dict, Any
+from pydantic import ValidationError # For testing validation errors
 
 # Import all models and enums from the corrected backend.models
 from backend.models import (
@@ -10,97 +11,105 @@ from backend.models import (
     Role,
     EvidenceSnippet,
     ValidationNote,
-    RoleStatus, # Enum
-    SQLModel,
+    RoleStatus,
+    # SQLModel, # Not directly used in tests for instantiation
 )
 
-# Helper for datetime comparisons
+# Helper for datetime comparisons (now expecting timezone-aware datetimes)
 def assert_datetimes_close(dt1: datetime, dt2: datetime, tolerance_seconds: int = 2):
+    # Ensure both are aware and in UTC for fair comparison
+    if dt1.tzinfo is None:
+        dt1 = dt1.replace(tzinfo=timezone.utc)
+    else:
+        dt1 = dt1.astimezone(timezone.utc)
+
+    if dt2.tzinfo is None:
+        dt2 = dt2.replace(tzinfo=timezone.utc)
+    else:
+        dt2 = dt2.astimezone(timezone.utc)
+
     assert abs((dt1 - dt2).total_seconds()) < tolerance_seconds
 
-# Tests for the "Client/Role" schema models
+# Tests for the "Client/Role" schema models (Updated for new schema)
 
 def test_client_model():
-    now = datetime.now(timezone.utc)
+    now_utc = datetime.now(timezone.utc)
     client_id = uuid4()
     client = Client(
-        id=client_id, # Explicit set for testing
+        id=client_id,
         display_name="Test Client LLC",
         notes="Some important notes about this client.",
-        created_at=now # Explicit set for testing
+        created_at=now_utc
     )
     assert client.id == client_id
     assert client.display_name == "Test Client LLC"
     assert client.notes == "Some important notes about this client."
-    assert client.created_at == now
-    assert client.source_documents == [] # Default empty list for relationship
-    assert client.roles == []           # Default empty list for relationship
+    assert client.created_at == now_utc
+    assert client.source_documents == []
+    assert client.roles == []
 
     # Test defaults
-    client_default = Client(display_name="Default Client")
+    client_default = Client(display_name="Default Client") # display_name is required
     assert isinstance(client_default.id, UUID)
     assert isinstance(client_default.created_at, datetime)
     assert_datetimes_close(client_default.created_at, datetime.now(timezone.utc))
     assert client_default.notes is None
 
 def test_sourcedocument_model():
-    now = datetime.now(timezone.utc)
+    now_utc = datetime.now(timezone.utc)
     client_uuid = uuid4()
     doc_id = uuid4()
-    metadata_content = {"source_url": "http://example.com/resume.pdf", "pages": 2}
 
     sd = SourceDocument(
-        id=doc_id, # explicit
+        id=doc_id,
         client_id=client_uuid,
-        file_name="John_Doe_Resume.pdf",
-        file_type="application/pdf",
-        content_hash="sha256_abcdef1234567890",
-        raw_text="Full text of the resume...",
-        uploaded_at=now, # explicit
-        processing_status="EXTRACTED",
-        metadata_=metadata_content # using metadata_ for python attribute
+        path="/documents/John_Doe_Resume.pdf",
+        mime_type="application/pdf",
+        is_final_resume=True,
+        uploaded_at=now_utc,
+        checksum="sha256_abcdef1234567890"
     )
     assert sd.id == doc_id
     assert sd.client_id == client_uuid
-    assert sd.file_name == "John_Doe_Resume.pdf"
-    assert sd.file_type == "application/pdf"
-    assert sd.content_hash == "sha256_abcdef1234567890"
-    assert sd.raw_text == "Full text of the resume..."
-    assert sd.uploaded_at == now
-    assert sd.processing_status == "EXTRACTED"
-    assert sd.metadata_ == metadata_content
-    assert sd.evidence_snippets == []
+    assert sd.path == "/documents/John_Doe_Resume.pdf"
+    assert sd.mime_type == "application/pdf"
+    assert sd.is_final_resume is True
+    assert sd.uploaded_at == now_utc
+    assert sd.checksum == "sha256_abcdef1234567890"
 
     # Test defaults
-    sd_default = SourceDocument(client_id=client_uuid, file_name="cover_letter.docx")
+    sd_default = SourceDocument(
+        client_id=client_uuid,
+        path="/docs/cover_letter.docx",
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        checksum="sha256_0987654321fedcba"
+    )
     assert isinstance(sd_default.id, UUID)
     assert isinstance(sd_default.uploaded_at, datetime)
-    assert sd_default.file_type is None
-    assert sd_default.content_hash is None
-    assert sd_default.raw_text is None
-    assert sd_default.processing_status == "PENDING" # Default value
-    assert sd_default.metadata_ is None
+    assert_datetimes_close(sd_default.uploaded_at, datetime.now(timezone.utc))
+    assert sd_default.is_final_resume is False # Default value
 
 def test_role_model():
-    now = datetime.now(timezone.utc)
+    now_utc = datetime.now(timezone.utc)
     client_uuid = uuid4()
     role_id = uuid4()
     start_d = date(2021, 6, 1)
     end_d = date(2023, 5, 31)
 
     role = Role(
-        id=role_id, # explicit
+        id=role_id,
         client_id=client_uuid,
         company_name="Tech Solutions Ltd.",
         title="Senior Software Engineer",
         start_date=start_d,
         end_date=end_d,
-        output_text="Developed and maintained key software components.",
+        output_text="Developed and maintained key software components.", # Required
         input_text_compact="SSE at Tech Solutions.",
-        status=RoleStatus.VERIFIED, # Explicit
-        revision=2, # Explicit
-        created_at=now, # explicit
-        updated_at=now  # explicit
+        validation_notes="This role has been cross-verified.", # String field
+        status=RoleStatus.ROLES_VERIFIED, # Enum from new definition
+        revision=2,
+        created_at=now_utc,
+        updated_at=now_utc
     )
     assert role.id == role_id
     assert role.client_id == client_uuid
@@ -110,21 +119,27 @@ def test_role_model():
     assert role.end_date == end_d
     assert role.output_text == "Developed and maintained key software components."
     assert role.input_text_compact == "SSE at Tech Solutions."
-    assert role.status == RoleStatus.VERIFIED
+    assert role.validation_notes == "This role has been cross-verified."
+    assert role.status == RoleStatus.ROLES_VERIFIED
     assert role.revision == 2
-    assert role.created_at == now
-    assert role.updated_at == now
+    assert role.created_at == now_utc
+    assert role.updated_at == now_utc
     assert role.evidence_snippets == []
-    assert role.validation_notes == []
+    # validation_notes is a field on Role, not a separate list of ValidationNote objects
 
     # Test defaults
-    role_default = Role(client_id=client_uuid, company_name="Innovatech", title="Developer")
+    role_default = Role(
+        client_id=client_uuid,
+        company_name="Innovatech",
+        title="Developer",
+        output_text="Default output text." # Required
+    )
     assert isinstance(role_default.id, UUID)
     assert role_default.start_date is None
     assert role_default.end_date is None
-    assert role_default.output_text is None
     assert role_default.input_text_compact is None
-    assert role_default.status == RoleStatus.PARSED # Default from instructions
+    assert role_default.validation_notes is None # Default for Optional[str]
+    assert role_default.status == RoleStatus.PARSED # Default from model
     assert role_default.revision == 0 # Default
     assert isinstance(role_default.created_at, datetime)
     assert isinstance(role_default.updated_at, datetime)
@@ -133,167 +148,119 @@ def test_role_model():
 
 
 def test_evidencesnippet_model():
-    now = datetime.now(timezone.utc)
-    doc_uuid = uuid4()
-    role_uuid = uuid4()
+    now_utc = datetime.now(timezone.utc)
+    role_uuid = uuid4() # Changed from doc_uuid as it links to Role
     snippet_id = uuid4()
-    metadata_content = {"source_page": 1, "coordinates": [10,20,100,50]}
 
     es = EvidenceSnippet(
-        id=snippet_id, # explicit
-        source_document_id=doc_uuid,
-        role_id=role_uuid,
+        id=snippet_id,
+        role_id=role_uuid, # Required, links to Role
         snippet_text="Key responsibility: Leading the backend team.",
-        file_name="resume_page1.png", # Denormalized
         page_number=1,
-        line_number_start=5,
-        line_number_end=6,
-        metadata_=metadata_content, # using metadata_
-        created_at=now # explicit
+        relevance_score=0.85, # New field
+        created_at=now_utc
     )
     assert es.id == snippet_id
-    assert es.source_document_id == doc_uuid
     assert es.role_id == role_uuid
     assert es.snippet_text == "Key responsibility: Leading the backend team."
-    assert es.file_name == "resume_page1.png"
     assert es.page_number == 1
-    assert es.line_number_start == 5
-    assert es.line_number_end == 6
-    assert es.metadata_ == metadata_content
-    assert es.created_at == now
+    assert es.relevance_score == 0.85
+    assert es.created_at == now_utc
 
     # Test defaults
-    es_default = EvidenceSnippet(source_document_id=doc_uuid, snippet_text="Another important point.")
+    es_default = EvidenceSnippet(role_id=role_uuid, snippet_text="Another important point.")
     assert isinstance(es_default.id, UUID)
-    assert es_default.role_id is None
-    assert es_default.file_name is None
     assert es_default.page_number is None
-    assert es_default.line_number_start is None
-    assert es_default.line_number_end is None
-    assert es_default.metadata_ is None
+    assert es_default.relevance_score is None # Default for Optional[float]
     assert isinstance(es_default.created_at, datetime)
+    assert_datetimes_close(es_default.created_at, datetime.now(timezone.utc))
 
 
 def test_validationnote_model():
-    now = datetime.now(timezone.utc)
-    role_uuid = uuid4()
-    note_id = uuid4()
+    now_utc = datetime.now(timezone.utc)
+    associated_role_id = uuid4()
 
+    notes_data = {"accuracy": "Confirmed", "source": "Email from HR"}
     vn = ValidationNote(
-        id=note_id, # explicit
-        role_id=role_uuid,
-        note_text="Start date confirmed via email.",
-        author="John Reviewer",
-        created_at=now # explicit
+        role_id=associated_role_id, # Is PK and FK
+        notes_json=notes_data, # Changed from note_text
+        created_at=now_utc
     )
-    assert vn.id == note_id
-    assert vn.role_id == role_uuid
-    assert vn.note_text == "Start date confirmed via email."
-    assert vn.author == "John Reviewer"
-    assert vn.created_at == now
+    assert vn.role_id == associated_role_id
+    assert vn.notes_json == notes_data
+    assert vn.created_at == now_utc
 
     # Test defaults
-    vn_default = ValidationNote(role_id=role_uuid, note_text="Consider re-parsing this role.")
-    assert isinstance(vn_default.id, UUID)
-    assert vn_default.author is None
+    vn_default = ValidationNote(role_id=uuid4()) # role_id is required (PK)
+    assert isinstance(vn_default.role_id, UUID)
+    assert vn_default.notes_json == {} # Default factory for Dict
     assert isinstance(vn_default.created_at, datetime)
+    assert_datetimes_close(vn_default.created_at, datetime.now(timezone.utc))
 
 
 def test_rolestatus_enum_values():
-    assert RoleStatus.DRAFT.value == "DRAFT"
-    assert RoleStatus.PARSED.value == "PARSED"
-    assert RoleStatus.VERIFIED.value == "VERIFIED"
-    assert RoleStatus.FLAGGED.value == "FLAGGED"
-    assert RoleStatus.ARCHIVED.value == "ARCHIVED"
-    assert isinstance(RoleStatus.DRAFT, RoleStatus)
-    assert isinstance(RoleStatus.DRAFT.value, str)
+    # Test new enum values
+    assert RoleStatus.PARSED.value == "Parsed"
+    assert RoleStatus.ROLES_VERIFIED.value == "RolesVerified"
+    assert RoleStatus.INPUT_SYNTHESIZED.value == "InputSynthesized"
+    assert RoleStatus.INPUT_CURATED.value == "InputCurated"
+    assert RoleStatus.VALIDATED.value == "Validated"
+    assert RoleStatus.EXPORTED.value == "Exported"
+
+    assert isinstance(RoleStatus.PARSED, RoleStatus)
+    assert isinstance(RoleStatus.PARSED.value, str)
 
 def test_pydantic_validation_for_new_models():
-    client_uuid = uuid4() # For FKs
+    client_uuid = uuid4()
+    role_uuid = uuid4()
 
-    with pytest.raises(Exception): # Pydantic ValidationError
-        Client.model_validate({"display_name": None}) # display_name is required
+    with pytest.raises(ValidationError, match="display_name"):
+        Client.model_validate({})
 
-    with pytest.raises(Exception):
-        SourceDocument.model_validate({"client_id": client_uuid}) # file_name required
+    with pytest.raises(ValidationError): # Check for multiple missing fields
+        SourceDocument.model_validate({"client_id": client_uuid}) # path, mime_type, checksum missing
 
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError): # Check for multiple missing fields
+        Role.model_validate({"client_id": client_uuid}) # company_name, title, output_text missing
+
+    with pytest.raises(ValidationError, match="type=enum"): # Updated regex for enum validation error
         Role.model_validate({
-            "client_id": client_uuid,
-            "company_name": "Test",
-            "title": "Test",
-            "status": "NON_EXISTENT_STATUS"
+            "client_id": client_uuid, "company_name": "Test", "title": "Test",
+            "output_text": "text", "status": "NON_EXISTENT_STATUS"
         })
+
+    with pytest.raises(ValidationError): # snippet_text missing
+        EvidenceSnippet.model_validate({"role_id": role_uuid})
+
+    with pytest.raises(ValidationError, match="role_id"): # role_id is PK
+        ValidationNote.model_validate({})
+
 
 def test_relationship_attributes_exist_for_new_models():
     client = Client(display_name="Rel Test Client")
     assert hasattr(client, "source_documents")
     assert hasattr(client, "roles")
 
-    source_doc = SourceDocument(client_id=uuid4(), file_name="doc.txt")
+    source_doc = SourceDocument(
+        client_id=uuid4(), path="p", mime_type="m", checksum="c"
+    )
     assert hasattr(source_doc, "client")
-    assert hasattr(source_doc, "evidence_snippets")
+    # No evidence_snippets on SourceDocument anymore
 
-    role = Role(client_id=uuid4(), company_name="Comp", title="Title")
+    role = Role(
+        client_id=uuid4(), company_name="Comp", title="Title", output_text="text"
+    )
     assert hasattr(role, "client")
     assert hasattr(role, "evidence_snippets")
-    assert hasattr(role, "validation_notes")
+    assert isinstance(role.validation_notes, (str, type(None))) # It's a field now
 
-    evidence_snippet = EvidenceSnippet(source_document_id=uuid4(), snippet_text="text")
-    assert hasattr(evidence_snippet, "source_document")
+    evidence_snippet = EvidenceSnippet(role_id=uuid4(), snippet_text="text")
+    # No source_document on EvidenceSnippet anymore
     assert hasattr(evidence_snippet, "role")
 
-    validation_note = ValidationNote(role_id=uuid4(), note_text="note")
+    validation_note = ValidationNote(role_id=uuid4())
     assert hasattr(validation_note, "role")
 
-def test_metadata_aliasing_in_new_models():
-    meta_dict = {"key": "value"}
-
-    # Test SourceDocument
-    # 1. Instantiate using the alias 'metadata'
-    sd_alias_inst = SourceDocument(client_id=uuid4(), file_name="f_alias", metadata=meta_dict)
-    assert sd_alias_inst.metadata_ == meta_dict # Python attribute should be populated
-
-    # 2. Instantiate using the Python attribute name 'metadata_'
-    sd_pyname_inst = SourceDocument(client_id=uuid4(), file_name="f_pyname", metadata_=meta_dict)
-    assert sd_pyname_inst.metadata_ == meta_dict
-
-    # 3. Test model_dump() (should use Python attribute names)
-    sd_dump_no_alias = sd_pyname_inst.model_dump()
-    assert sd_dump_no_alias.get("metadata_") == meta_dict
-    assert "metadata" not in sd_dump_no_alias # Alias should not be present
-
-    # 4. Test model_dump(by_alias=True)
-    # Based on previous failures, SQLModel 0.0.18 might still output python name `metadata_`
-    # even with by_alias=True if the alias primarily serves validation/instantiation.
-    # Let's test for the actual behavior observed or expected with this SQLModel version.
-    sd_dump_with_alias = sd_alias_inst.model_dump(by_alias=True)
-    # If SQLModel's `alias` on Field works for serialization with `sa_column(name=...)`, this should pass:
-    # assert sd_dump_with_alias.get("metadata") == meta_dict
-    # assert "metadata_" not in sd_dump_with_alias
-    # If it doesn't serialize to the alias, this will pass:
-    if "metadata" not in sd_dump_with_alias:
-        print("Note: model_dump(by_alias=True) did not serialize 'metadata_' to 'metadata' for SourceDocument.")
-        assert sd_dump_with_alias.get("metadata_") == meta_dict
-    else: # It did serialize to the alias
-        assert sd_dump_with_alias.get("metadata") == meta_dict
-        assert "metadata_" not in sd_dump_with_alias
-
-    # Test EvidenceSnippet similarly
-    es_alias_inst = EvidenceSnippet(source_document_id=uuid4(), snippet_text="s_alias", metadata=meta_dict)
-    assert es_alias_inst.metadata_ == meta_dict
-
-    es_pyname_inst = EvidenceSnippet(source_document_id=uuid4(), snippet_text="s_pyname", metadata_=meta_dict)
-    assert es_pyname_inst.metadata_ == meta_dict
-
-    es_dump_no_alias = es_pyname_inst.model_dump()
-    assert es_dump_no_alias.get("metadata_") == meta_dict
-    assert "metadata" not in es_dump_no_alias
-
-    es_dump_with_alias = es_alias_inst.model_dump(by_alias=True)
-    if "metadata" not in es_dump_with_alias:
-        print("Note: model_dump(by_alias=True) did not serialize 'metadata_' to 'metadata' for EvidenceSnippet.")
-        assert es_dump_with_alias.get("metadata_") == meta_dict
-    else:
-        assert es_dump_with_alias.get("metadata") == meta_dict
-        assert "metadata_" not in es_dump_with_alias
+# This test is obsolete as metadata_ and its alias have been removed from models
+# def test_metadata_aliasing_in_new_models():
+#     pass
