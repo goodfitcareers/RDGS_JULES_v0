@@ -3,107 +3,90 @@ from enum import Enum as PyEnum
 from typing import List, Optional, Dict, Any
 from uuid import UUID, uuid4
 
-from sqlmodel import Field, Relationship, SQLModel, Column, JSON, Enum as SaEnum # For SQLAlchemy Enum type
-from sqlalchemy import Text # For TEXT column type explicitly
+from sqlmodel import SQLModel, Field, Relationship, Column
+from sqlalchemy.dialects.postgresql import JSONB # Added JSONB
 
 # Enum definition for RoleStatus
-# This matches CREATE TYPE role_status_enum AS ENUM (...) in DDL
 class RoleStatus(str, PyEnum):
-    DRAFT = "DRAFT"
-    PARSED = "PARSED"
-    VERIFIED = "VERIFIED"
-    FLAGGED = "FLAGGED"
-    ARCHIVED = "ARCHIVED"
+    PARSED = "Parsed"
+    ROLES_VERIFIED = "RolesVerified"
+    INPUT_SYNTHESIZED = "InputSynthesized"
+    INPUT_CURATED = "InputCurated"
+    VALIDATED = "Validated"
+    EXPORTED = "Exported"
 
 # Table Models
-class ClientBase(SQLModel):
-    display_name: str = Field(index=True) # DDL has NOT NULL, implies required
-    notes: Optional[str] = Field(default=None, sa_column=Column(Text))
-
-class Client(ClientBase, table=True):
+class Client(SQLModel, table=True):
     __tablename__ = "clients"
     id: UUID = Field(default_factory=uuid4, primary_key=True, index=True, nullable=False)
+    display_name: str = Field(..., index=True) # Explicitly Pydantic-required and indexed
+    notes: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), nullable=False)
 
     source_documents: List["SourceDocument"] = Relationship(back_populates="client")
     roles: List["Role"] = Relationship(back_populates="client")
 
-class SourceDocumentBase(SQLModel):
-    file_name: str # NOT NULL in DDL
-    file_type: Optional[str] = Field(default=None, max_length=50) # VARCHAR(50) in DDL
-    content_hash: Optional[str] = Field(default=None, max_length=64, index=True) # VARCHAR(64)
-    raw_text: Optional[str] = Field(default=None, sa_column=Column(Text))
-    processing_status: Optional[str] = Field(default="PENDING", max_length=50) # VARCHAR(50)
-    # Using metadata_ to avoid conflict with SQLModel's own .metadata attribute
-    # The DDL column name is 'metadata'. Pydantic alias allows instantiation with 'metadata'.
-    metadata_: Optional[Dict[str, Any]] = Field(default=None, alias="metadata", sa_column=Column(JSON, name="metadata"))
-
-class SourceDocument(SourceDocumentBase, table=True):
+class SourceDocument(SQLModel, table=True):
     __tablename__ = "source_documents"
     id: UUID = Field(default_factory=uuid4, primary_key=True, index=True, nullable=False)
-    client_id: UUID = Field(foreign_key="clients.id", index=True, nullable=False) # NOT NULL in DDL
+    client_id: UUID = Field(foreign_key="clients.id", index=True, nullable=False)
+    path: str
+    mime_type: str
+    is_final_resume: bool = Field(default=False)
     uploaded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), nullable=False)
+    checksum: str
 
-    client: Client = Relationship(back_populates="source_documents")
-    evidence_snippets: List["EvidenceSnippet"] = Relationship(back_populates="source_document")
+    client: "Client" = Relationship(back_populates="source_documents")
 
-class RoleBase(SQLModel):
-    company_name: str # NOT NULL in DDL
-    title: str # NOT NULL in DDL
-    start_date: Optional[date] = None
-    end_date: Optional[date] = None
-    output_text: Optional[str] = Field(default=None, sa_column=Column(Text))
-    input_text_compact: Optional[str] = Field(default=None, sa_column=Column(Text))
-    # For status, using SaEnum to map to PostgreSQL native ENUM type
-    status: RoleStatus = Field(default=RoleStatus.PARSED, sa_column=Column(SaEnum(RoleStatus, name="role_status_enum", create_type=False), nullable=False))
-    revision: int = Field(default=0, nullable=False) # Default 0, NOT NULL
-
-class Role(RoleBase, table=True):
+class Role(SQLModel, table=True):
     __tablename__ = "roles"
     id: UUID = Field(default_factory=uuid4, primary_key=True, index=True, nullable=False)
-    client_id: UUID = Field(foreign_key="clients.id", index=True, nullable=False) # NOT NULL
+    client_id: UUID = Field(foreign_key="clients.id", index=True, nullable=False)
+    company_name: str
+    title: str
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    output_text: str
+    input_text_compact: Optional[str] = Field(default=None)
+    validation_notes: Optional[str] = Field(default=None) # This is a direct text field
+    status: RoleStatus = Field(default=RoleStatus.PARSED, nullable=False)
+    revision: int = Field(default=0, nullable=False)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         nullable=False,
-        sa_column_kwargs={"onupdate": lambda: datetime.now(timezone.utc)} # For DB-side update
+        sa_column_kwargs={"onupdate": lambda: datetime.now(timezone.utc)}
     )
 
-    client: Client = Relationship(back_populates="roles")
+    client: "Client" = Relationship(back_populates="roles")
     evidence_snippets: List["EvidenceSnippet"] = Relationship(back_populates="role")
-    validation_notes: List["ValidationNote"] = Relationship(back_populates="role")
+    # The One-to-One ValidationNote is linked via its own role_id PK/FK
 
-class EvidenceSnippetBase(SQLModel):
-    snippet_text: str = Field(sa_column=Column(Text)) # NOT NULL
-    file_name: Optional[str] = Field(default=None) # TEXT in DDL
-    page_number: Optional[int] = None
-    line_number_start: Optional[int] = None
-    line_number_end: Optional[int] = None
-    metadata_: Optional[Dict[str, Any]] = Field(default=None, alias="metadata", sa_column=Column(JSON, name="metadata"))
-
-class EvidenceSnippet(EvidenceSnippetBase, table=True):
+class EvidenceSnippet(SQLModel, table=True):
     __tablename__ = "evidence_snippets"
     id: UUID = Field(default_factory=uuid4, primary_key=True, index=True, nullable=False)
-    source_document_id: UUID = Field(foreign_key="source_documents.id", index=True, nullable=False) # NOT NULL
-    role_id: Optional[UUID] = Field(default=None, foreign_key="roles.id", index=True) # Nullable
+    role_id: UUID = Field(foreign_key="roles.id", index=True, nullable=False)
+    snippet_text: str
+    page_number: Optional[int] = None
+    relevance_score: Optional[float] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), nullable=False)
 
-    source_document: SourceDocument = Relationship(back_populates="evidence_snippets")
-    role: Optional[Role] = Relationship(back_populates="evidence_snippets")
+    role: "Role" = Relationship(back_populates="evidence_snippets")
 
-class ValidationNoteBase(SQLModel):
-    note_text: str = Field(sa_column=Column(Text)) # NOT NULL
-    author: Optional[str] = Field(default=None, max_length=255) # VARCHAR(255)
-    # status_change: Optional[RoleStatus] = Field(default=None, sa_column=Column(SaEnum(RoleStatus, name="role_status_enum", create_type=False)))
-
-
-class ValidationNote(ValidationNoteBase, table=True):
+class ValidationNote(SQLModel, table=True):
     __tablename__ = "validation_notes"
-    id: UUID = Field(default_factory=uuid4, primary_key=True, index=True, nullable=False)
-    role_id: UUID = Field(foreign_key="roles.id", index=True, nullable=False) # NOT NULL
+    # role_id is PK and FK
+    role_id: UUID = Field(primary_key=True, foreign_key="roles.id", index=True, nullable=False) # Removed default_factory
+    notes_json: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSONB, nullable=False))
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), nullable=False)
 
-    role: Role = Relationship(back_populates="validation_notes")
+    # For one-to-one, SQLModel infers the relationship from the PK/FK.
+    # If explicit 'role' attribute is needed for type hinting or access,
+    # it can be added but back_populates is tricky for one-to-one where
+    # the FK is also the PK on the child. Usually, direct access via querying is done.
+    # Per spec, a 'role: Role' relationship is expected.
+    role: "Role" = Relationship()
+
 
 # Update forward refs for all models
 Client.model_rebuild()
