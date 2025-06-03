@@ -21,19 +21,17 @@ from .models import Role, RoleStatus # Assuming Role and RoleStatus are in model
 # from .models import Client # If client_id needs to be validated against Client table as UUID
 from uuid import UUID # If client_id is expected to be UUID
 
-# NOTE: The Role and RoleStatus models are currently NOT in backend/models.py
-# The sync_roles_node will not fully work until models.py defines them.
 from .models import Role, RoleStatus # This will cause an ImportError if Role/RoleStatus are not in models.py
 
 from .settings import settings # For API keys, LangSmith settings, etc.
 
-# Setup LangSmith tracing (example, actual setup might vary)
-# Ensure these are set in your .env file if you want to use LangSmith
-# os.environ["LANGCHAIN_TRACING_V2"] = "true"
-# if settings.LANGSMITH_API_KEY:
-#    os.environ["LANGCHAIN_API_KEY"] = str(settings.LANGSMITH_API_KEY)
-# if settings.LANGSMITH_PROJECT:
-#    os.environ["LANGCHAIN_PROJECT"] = str(settings.LANGSMITH_PROJECT)
+# Setup LangSmith tracing
+if settings.LANGCHAIN_TRACING_V2:
+    os.environ["LANGCHAIN_TRACING_V2"] = "true"
+# LANGSMITH_API_KEY should be picked up automatically by LangChain if set in the environment.
+# It's typically not accessed via settings for security reasons (should be in .env directly)
+if settings.LANGSMITH_PROJECT:
+    os.environ["LANGCHAIN_PROJECT"] = settings.LANGSMITH_PROJECT
 
 
 class GraphState(TypedDict):
@@ -186,49 +184,102 @@ def extract_node(state: GraphState) -> Dict[str, Any]:
 
 
 def parse_roles_node(state: GraphState) -> Dict[str, Any]:
-    print("--- Running Parse Roles Node (Placeholder) ---")
-
-    # If there was a critical error in a *previous* node that should stop processing
-    if state.get("error_message") and not state.get("current_node_error"): # current_node_error would be from THIS node if it ran before
-        print("Skipping Parse Roles Node due to pre-existing critical errors.")
-        # Preserve roles_draft if it was somehow populated before, otherwise default
-        return {"roles_draft": state.get("roles_draft", [])}
-
+    print("--- Running Parse Roles Node ---")
 
     current_node_error_output: Optional[str] = None
-    roles_draft_output: Optional[List[Dict[str, Any]]] = state.get("roles_draft") # Default to existing
+    roles_draft_output: List[Dict[str, Any]] = [] # Initialize to empty list
 
-    if not state.get("resume_text"):
+    # If there was a critical error in a *previous* node that should stop processing,
+    # or if resume_text is missing.
+    # current_node_error is for this node's potential errors from previous runs if graph retries.
+    # error_message is the accumulated error from all previous nodes.
+    if state.get("error_message") and not state.get("current_node_error"):
+        print("Skipping Parse Roles Node due to pre-existing critical errors from other nodes.")
+        return {"roles_draft": roles_draft_output, "current_node_error": None} # Return empty list, no new error from this node
+
+    resume_text = state.get("resume_text")
+    if not resume_text:
         print("No resume text to parse for roles.")
         current_node_error_output = "Cannot parse roles, resume text is missing."
-        roles_draft_output = [] # Ensure it's an empty list not None if error
+        # roles_draft_output is already an empty list
     else:
-        print(f"Parsing roles from resume text (length: {len(state['resume_text'])})")
-        # Placeholder logic: Simulate LLM call or parsing logic
-        # In a real scenario, this would involve an LLM call and error handling for that call
-        try:
-            # llm_output = call_llm_for_roles(state['resume_text']) # Fictional LLM call
-            # roles_draft_output = llm_output
-            roles_draft_output = [{"company_name": "Placeholder Inc.", "title": "Chief Placeholder Officer", "llm_confidence": 0.9}]
-            print(f"Successfully parsed roles (placeholder): {roles_draft_output}")
-        except Exception as e:
-            msg = f"Failed to parse roles from LLM: {str(e)}"
-            print(msg)
-            current_node_error_output = msg
-            roles_draft_output = [] # Error in parsing, output empty list
+        print(f"Parsing roles from resume text (length: {len(resume_text)}) using model: {settings.OPENAI_MODEL_NAME}")
 
-    # Accumulate errors
+        client = OpenAI(api_key=settings.OPENAI_API_KEY)
+
+        prompt = f"""
+Extract the professional roles from the following resume text.
+Return the output as a JSON object containing a single key "roles", which is a list of role objects.
+Each role object should have the following keys:
+- "company_name": string (name of the company)
+- "title": string (job title)
+- "start_date": string (e.g., "YYYY-MM-DD", "Mon YYYY", or "YYYY")
+- "end_date": string (e.g., "YYYY-MM-DD", "Mon YYYY", "YYYY", or "Present")
+- "description_points": list of strings (bullet points or paragraphs describing responsibilities and achievements)
+
+Resume Text:
+---
+{resume_text}
+---
+
+JSON Output:
+"""
+        response_content_for_error_logging = "" # To store response content for logging in case of JSONDecodeError
+        try:
+            response = client.chat.completions.create(
+                model=settings.OPENAI_MODEL_NAME,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                # Potential other parameters: temperature, max_tokens, etc.
+            )
+
+            response_content = response.choices[0].message.content
+            response_content_for_error_logging = response_content # Store for potential error logging
+            if response_content:
+                parsed_json = json.loads(response_content)
+                if "roles" in parsed_json and isinstance(parsed_json["roles"], list):
+                    roles_draft_output = parsed_json["roles"]
+                    print(f"Successfully parsed {len(roles_draft_output)} roles from LLM.")
+                else:
+                    current_node_error_output = "LLM output is valid JSON but does not contain a 'roles' list or 'roles' is not a list."
+                    print(current_node_error_output)
+            else:
+                current_node_error_output = "LLM response content is empty."
+                print(current_node_error_output)
+
+        except APITimeoutError as e:
+            current_node_error_output = f"OpenAI API timeout: {str(e)}"
+        except APIConnectionError as e:
+            current_node_error_output = f"OpenAI API connection error: {str(e)}"
+        except APIStatusError as e:
+            current_node_error_output = f"OpenAI API status error (code {e.status_code}): {e.response.text if hasattr(e, 'response') and e.response else str(e)}"
+        except RateLimitError as e:
+            current_node_error_output = f"OpenAI API rate limit error: {str(e)}"
+        except OpenAI.BadRequestError as e: # Corrected namespace
+            current_node_error_output = f"OpenAI API Bad Request (likely malformed JSON in LLM response or prompt issue): {str(e)}"
+        except json.JSONDecodeError as e:
+            current_node_error_output = f"Failed to decode JSON from LLM response: {str(e)}. Response content snippet: {response_content_for_error_logging[:500]}..."
+        except Exception as e: # Catch-all for other unexpected errors
+            current_node_error_output = f"An unexpected error occurred during LLM call or processing: {str(e)}"
+
+        if current_node_error_output:
+            print(current_node_error_output) # Print error specific to this attempt
+            roles_draft_output = [] # Ensure output is empty list on error
+
+    # Accumulate errors for the graph state
     final_accumulated_error = state.get("error_message")
     if current_node_error_output:
-        if final_accumulated_error:
+        if final_accumulated_error: # If there were errors from previous nodes
             final_accumulated_error = f"{final_accumulated_error}; {current_node_error_output}"
-        else:
+        else: # This node is the first to report an error
             final_accumulated_error = current_node_error_output
+    # If this node ran successfully but there were prior errors, preserve them.
+    # If this node ran successfully and there were no prior errors, final_accumulated_error remains None.
 
     return {
         "roles_draft": roles_draft_output,
         "error_message": final_accumulated_error,
-        "current_node_error": current_node_error_output
+        "current_node_error": current_node_error_output # Specific error from this run
     }
 
 
@@ -297,21 +348,16 @@ def sync_roles_node(state: GraphState) -> Dict[str, Any]:
     else:
         # Assuming client_id in the state is a string that needs to be UUID
         # This depends on how Client.id is defined in models.py
-        # For this example, we'll assume Role.client_id expects a UUID.
-        # If Role.client_id is an Int FK to a Client table with int PK, adjust accordingly.
-        # The current models.py for Client does not exist, but Role expects client_id.
-        # The prompt doesn't specify a Client model, but `client_id` is in GraphState.
-        # Let's assume for now Role model needs a client_id that is string or can be passed as is.
-        # If Client.id is UUID, it should be:
-        # try:
-        #    client_id_for_role = UUID(client_id_str)
-        # except ValueError:
-        #    current_node_error_output = f"Invalid client_id format: {client_id_str}. Must be a valid UUID."
-        #    print(current_node_error_output)
-        #    client_id_for_role = None # Stop further processing
-        client_id_for_role = client_id_str # Using as is for now; adjust if Role.client_id is UUID
+        # Role.client_id is a UUID.
+        client_id_for_role: Optional[UUID] = None
+        try:
+            client_id_for_role = UUID(client_id_str)
+        except ValueError:
+            current_node_error_output = f"Invalid client_id format: '{client_id_str}'. Must be a valid UUID."
+            print(current_node_error_output)
+            # client_id_for_role remains None, sync will be skipped
 
-        if not current_node_error_output: # Proceed if client_id is valid (or validated)
+        if client_id_for_role and not current_node_error_output: # Proceed if client_id is valid UUID
             print(f"Attempting to sync {len(roles_to_sync)} roles for client_id: {client_id_for_role}")
 
             engine = create_engine(settings.DATABASE_URL) # Create engine here
@@ -370,49 +416,49 @@ def sync_roles_node(state: GraphState) -> Dict[str, Any]:
 
 
 # Graph Builder
-# workflow = StateGraph(GraphState)
-# workflow.add_node("extract", extract_node)
-# workflow.add_node("parse_roles", parse_roles_node)
-# workflow.add_node("sync_roles", sync_roles_node)
+workflow = StateGraph(GraphState)
+workflow.add_node("extract", extract_node)
+workflow.add_node("parse_roles", parse_roles_node)
+workflow.add_node("sync_roles", sync_roles_node)
 
-# workflow.set_entry_point("extract")
+workflow.set_entry_point("extract")
 
-# # Define conditional edges based on 'current_node_error'
-# # This allows the graph to proceed to the next step only if the current one was successful.
-# # A more sophisticated error handling strategy might involve a dedicated error_handler_node.
+# Define conditional edges based on 'current_node_error'
+# This allows the graph to proceed to the next step only if the current one was successful.
+# A more sophisticated error handling strategy might involve a dedicated error_handler_node.
 
-# def decide_next_node(state: GraphState) -> str:
-#     if state.get("current_node_error"):
-#         print(f"Error detected: {state['current_node_error']}. Ending graph or routing to error handler.")
-#         return END # Or an error handling node name
-#     # Check specific conditions for routing if needed
-#     print("No error in current node, proceeding.")
-#     return "continue" # A conventional name for the "success" path
-
-
-# # Edges from extract_node
-# workflow.add_conditional_edges(
-#     "extract",
-#     decide_next_node,
-#     {"continue": "parse_roles", END: END} # If error, go to END. If success, go to parse_roles.
-# )
-
-# # Edges from parse_roles_node
-# workflow.add_conditional_edges(
-#     "parse_roles",
-#     decide_next_node,
-#     {"continue": "sync_roles", END: END}
-# )
-
-# # Edge from sync_roles_node (always goes to END or could have its own decision)
-# workflow.add_conditional_edges(
-#     "sync_roles",
-#     decide_next_node, # Or simply END if no further conditional logic from sync
-#     {"continue": END, END: END}
-# )
+def decide_next_node(state: GraphState) -> str:
+    if state.get("current_node_error"):
+        print(f"Error detected: {state['current_node_error']}. Ending graph or routing to error handler.")
+        return END # Or an error handling node name
+    # Check specific conditions for routing if needed
+    print("No error in current node, proceeding.")
+    return "continue" # A conventional name for the "success" path
 
 
-# app = workflow.compile()
+# Edges from extract_node
+workflow.add_conditional_edges(
+    "extract",
+    decide_next_node,
+    {"continue": "parse_roles", END: END} # If error, go to END. If success, go to parse_roles.
+)
+
+# Edges from parse_roles_node
+workflow.add_conditional_edges(
+    "parse_roles",
+    decide_next_node,
+    {"continue": "sync_roles", END: END}
+)
+
+# Edge from sync_roles_node (always goes to END or could have its own decision)
+workflow.add_conditional_edges(
+    "sync_roles",
+    decide_next_node, # Or simply END if no further conditional logic from sync
+    {"continue": END, END: END}
+)
+
+
+app = workflow.compile()
 
 # Example usage (for testing locally if needed)
 # if __name__ == "__main__":
