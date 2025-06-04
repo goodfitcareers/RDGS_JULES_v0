@@ -225,3 +225,236 @@ def test_extract_node_no_files_provided(mock_extract_text):
     assert output_state["error_message"] is None
 
     mock_extract_text.assert_not_called()
+
+
+# --- Tests for extract_text_from_file ---
+import pytest
+import os # For os.path.exists mock
+import mimetypes # For mimetypes.guess_type mock
+from unittest.mock import MagicMock, mock_open
+
+from backend.pipeline import extract_text_from_file # The function to test
+# FileNotFoundError and OSError are built-in but importing for clarity if needed for specific checks
+# from backend.pipeline import FileNotFoundError, OSError
+
+
+# Helper to create mock Unstructured elements
+def create_mock_unstructured_element(text_content: str):
+    el = MagicMock()
+    el.text = text_content
+    return el
+
+
+@patch("backend.pipeline.os.path.exists", return_value=True)
+@patch("backend.pipeline.mimetypes.guess_type", return_value=("application/pdf", None))
+@patch("backend.pipeline.auto") # Patch the imported module 'auto'
+def test_extract_text_unstructured_success(mock_auto_module, mock_guess_type, mock_exists):
+    """4. Test successful extraction using unstructured.io."""
+    mock_auto_module.partition_file.return_value = [create_mock_unstructured_element("Unstructured text")]
+    result = extract_text_from_file("dummy.pdf")
+    assert result == "Unstructured text"
+    mock_auto_module.partition_file.assert_called_once_with(filename="dummy.pdf")
+
+
+@patch("backend.pipeline.os.path.exists", return_value=True)
+@patch("backend.pipeline.mimetypes.guess_type", return_value=("application/pdf", None))
+@patch("backend.pipeline.auto") # Patch the imported module 'auto'
+@patch("backend.pipeline.PdfReader")
+def test_extract_text_pypdf_fallback_success_on_unstructured_exception(
+    mock_pdf_reader, mock_auto_module, mock_guess_type, mock_exists
+):
+    """5. Test successful extraction using pypdf when unstructured.io fails."""
+    mock_auto_module.partition_file.side_effect = Exception("Unstructured failed")
+    mock_pdf_instance = MagicMock()
+    mock_page = MagicMock()
+    mock_page.extract_text.return_value = "PDF text"
+    mock_pdf_instance.pages = [mock_page]
+    mock_pdf_reader.return_value = mock_pdf_instance
+
+    with patch("builtins.open", mock_open(read_data=b"dummy pdf data")) as mock_file_open:
+        result = extract_text_from_file("dummy.pdf")
+        assert result == "PDF text"
+        mock_file_open.assert_called_once_with("dummy.pdf", "rb")
+        mock_pdf_reader.assert_called_once_with(mock_file_open.return_value)
+
+
+@patch("backend.pipeline.os.path.exists", return_value=True)
+@patch("backend.pipeline.mimetypes.guess_type", return_value=("application/pdf", None))
+@patch("backend.pipeline.auto") # Patch the imported module 'auto'
+@patch("backend.pipeline.PdfReader")
+def test_extract_text_pypdf_fallback_success_on_unstructured_empty(
+    mock_pdf_reader, mock_auto_module, mock_guess_type, mock_exists
+):
+    """5. Test successful extraction using pypdf when unstructured.io returns empty."""
+    mock_auto_module.partition_file.return_value = [] # Unstructured returns no elements
+    mock_pdf_instance = MagicMock()
+    mock_page = MagicMock()
+    mock_page.extract_text.return_value = "PDF text from empty"
+    mock_pdf_instance.pages = [mock_page]
+    mock_pdf_reader.return_value = mock_pdf_instance
+
+    with patch("builtins.open", mock_open(read_data=b"dummy pdf data")) as mock_file_open:
+        result = extract_text_from_file("dummy.pdf")
+        assert result == "PDF text from empty"
+        mock_file_open.assert_called_once_with("dummy.pdf", "rb")
+
+
+@patch("backend.pipeline.os.path.exists", return_value=True)
+@patch(
+    "backend.pipeline.mimetypes.guess_type",
+    return_value=(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        None,
+    ),
+)
+@patch("backend.pipeline.auto") # Patch the imported module 'auto'
+@patch("backend.pipeline.Document") # Mock docx.Document
+def test_extract_text_docx_fallback_success_on_unstructured_exception(
+    mock_docx_document, mock_auto_module, mock_guess_type, mock_exists
+):
+    """6. Test successful extraction using python-docx when unstructured.io fails."""
+    mock_auto_module.partition_file.side_effect = Exception("Unstructured failed")
+    mock_doc_instance = MagicMock()
+    mock_para1 = MagicMock()
+    mock_para1.text = "Docx para 1"
+    mock_para2 = MagicMock()
+    mock_para2.text = "Docx para 2"
+    mock_doc_instance.paragraphs = [mock_para1, mock_para2]
+    mock_docx_document.return_value = mock_doc_instance
+
+    result = extract_text_from_file("dummy.docx")
+    assert result == "Docx para 1\nDocx para 2"
+    mock_docx_document.assert_called_once_with("dummy.docx")
+
+
+@patch("backend.pipeline.os.path.exists", return_value=True)
+@patch(
+    "backend.pipeline.mimetypes.guess_type",
+    return_value=(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        None,
+    ),
+)
+@patch("backend.pipeline.auto") # Patch the imported module 'auto'
+@patch("backend.pipeline.Document") # Mock docx.Document
+def test_extract_text_docx_fallback_success_on_unstructured_empty(
+    mock_docx_document, mock_auto_module, mock_guess_type, mock_exists
+):
+    """6. Test successful extraction using python-docx when unstructured.io returns empty."""
+    mock_auto_module.partition_file.return_value = [] # Unstructured returns no elements
+    mock_doc_instance = MagicMock()
+    mock_para1 = MagicMock()
+    mock_para1.text = "Docx para 1 empty"
+    mock_doc_instance.paragraphs = [mock_para1]
+    mock_docx_document.return_value = mock_doc_instance
+
+    result = extract_text_from_file("dummy.docx")
+    assert result == "Docx para 1 empty"
+
+
+@pytest.mark.parametrize(
+    "file_ext, mime_type, expected_content",
+    [
+        (".txt", "text/plain", "Plain text content"),
+        (".md", "text/markdown", "Markdown content"),
+        (".html", "text/html", "HTML content"),
+    ],
+)
+@patch("backend.pipeline.os.path.exists", return_value=True)
+@patch("backend.pipeline.auto") # Patch the imported module 'auto'
+def test_extract_text_direct_read_fallback_success(
+    mock_auto_module, mock_exists, file_ext, mime_type, expected_content
+):
+    """7. Test direct read for .txt/.md/.html when unstructured fails."""
+    mock_auto_module.partition_file.side_effect = Exception("Unstructured failed")
+    file_path = f"dummy{file_ext}"
+
+    with patch("backend.pipeline.mimetypes.guess_type", return_value=(mime_type, None)):
+        with patch("builtins.open", mock_open(read_data=expected_content)) as mock_file:
+            result = extract_text_from_file(file_path)
+            assert result == expected_content
+            mock_file.assert_called_once_with(file_path, encoding="utf-8", errors="ignore")
+
+
+@patch("backend.pipeline.os.path.exists", return_value=True)
+@patch("backend.pipeline.mimetypes.guess_type", return_value=("application/pdf", None))
+@patch("backend.pipeline.auto") # Patch the imported module 'auto'
+@patch("backend.pipeline.PdfReader")
+def test_extract_text_unstructured_empty_then_pypdf_success(
+    mock_pdf_reader, mock_auto_module, mock_guess_type, mock_exists
+):
+    """8. Test unstructured returns empty, then pypdf fallback is used."""
+    mock_auto_module.partition_file.return_value = []  # Empty list of elements
+
+    mock_pdf_instance = MagicMock()
+    mock_page = MagicMock()
+    mock_page.extract_text.return_value = "PDF text after empty unstructured"
+    mock_pdf_instance.pages = [mock_page]
+    mock_pdf_reader.return_value = mock_pdf_instance
+
+    with patch("builtins.open", mock_open(read_data=b"dummy pdf data")) as mock_file_open:
+        result = extract_text_from_file("dummy.pdf")
+        assert result == "PDF text after empty unstructured"
+
+
+@patch("backend.pipeline.os.path.exists", return_value=True)
+@patch("backend.pipeline.mimetypes.guess_type", return_value=("application/unknown", None))
+@patch("backend.pipeline.auto") # Patch the imported module 'auto'
+def test_extract_text_unsupported_type_returns_empty_string(
+    mock_auto_module, mock_guess_type, mock_exists, capsys
+):
+    """9. Test unsupported file type returns empty string and logs warning (no OSError)."""
+    mock_auto_module.partition_file.side_effect = Exception("Unstructured failed")
+    # Also test when unstructured returns empty
+    # mock_auto_module.partition_file.return_value = []
+
+    result = extract_text_from_file("dummy.xyz")
+    assert result == ""
+
+    # Check that it tried unstructured
+    mock_auto_module.partition_file.assert_called_once_with(filename="dummy.xyz")
+
+    # Check print output for the unsupported message
+    captured = capsys.readouterr()
+    assert "Unsupported file type for fallback: application/unknown for file dummy.xyz" in captured.out
+    # Crucially, no OSError should be raised here by extract_text_from_file directly
+
+
+@patch("backend.pipeline.os.path.exists", return_value=False)
+def test_extract_text_file_not_found(mock_exists):
+    """10. Test FileNotFoundError is raised if file doesn't exist."""
+    with pytest.raises(FileNotFoundError, match="File not found: non_existent_file.txt"):
+        extract_text_from_file("non_existent_file.txt")
+    mock_exists.assert_called_once_with("non_existent_file.txt")
+
+
+@patch("backend.pipeline.os.path.exists", return_value=True)
+@patch("backend.pipeline.mimetypes.guess_type", return_value=("application/pdf", None))
+@patch("backend.pipeline.auto") # Patch the imported module 'auto'
+@patch("backend.pipeline.PdfReader")
+def test_extract_text_all_methods_fail_oserror(
+    mock_pdf_reader, mock_auto_module, mock_guess_type, mock_exists, capsys
+):
+    """11. Test OSError is raised if all extraction methods fail for a supported fallback type."""
+    mock_auto_module.partition_file.side_effect = Exception("Unstructured failed badly")
+    mock_pdf_reader.side_effect = Exception("PdfReader failed badly")
+
+    with patch("builtins.open", mock_open(read_data=b"dummy pdf data")) as mock_file_open:
+        with pytest.raises(OSError) as exc_info:
+            extract_text_from_file("dummy_corrupted.pdf")
+
+    assert "Failed to extract text from dummy_corrupted.pdf using all methods" in str(exc_info.value)
+    assert "PdfReader failed badly" in str(exc_info.value) # Check last error is mentioned
+
+    # Check that unstructured was tried
+    mock_auto_module.partition_file.assert_called_once_with(filename="dummy_corrupted.pdf")
+    # Check that pypdf was tried
+    mock_file_open.assert_called_once_with("dummy_corrupted.pdf", "rb")
+    mock_pdf_reader.assert_called_once_with(mock_file_open.return_value)
+
+    # Verify logs/prints
+    captured = capsys.readouterr()
+    assert "unstructured.io failed for dummy_corrupted.pdf" in captured.out
+    assert "Unstructured failed badly" in captured.out
+    assert "Attempting fallback extraction for dummy_corrupted.pdf" in captured.out
+    assert "Fallback extraction failed for dummy_corrupted.pdf: PdfReader failed badly" in captured.out
