@@ -3,7 +3,7 @@ from enum import Enum as PyEnum
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
 
-from sqlalchemy.dialects.postgresql import JSONB  # Added JSONB
+from sqlalchemy.types import JSON # Changed from JSONB for broader compatibility
 from sqlmodel import Column, Field, Relationship, SQLModel
 
 
@@ -104,7 +104,7 @@ class ValidationNote(SQLModel, table=True):
         primary_key=True, foreign_key="roles.id", index=True, nullable=False
     )  # Removed default_factory
     notes_json: Dict[str, Any] = Field(
-        default_factory=dict, sa_column=Column(JSONB, nullable=False)
+        default_factory=dict, sa_column=Column(JSON, nullable=False) # Changed JSONB to JSON
     )
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc), nullable=False
