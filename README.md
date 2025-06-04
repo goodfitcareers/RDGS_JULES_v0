@@ -60,7 +60,7 @@ Dataset Distiller will provide an automated, robust, and extensible solution to 
 *   **Backend:** Python (FastAPI)
 *   **Data Processing:** LangChain, Unstructured.io, Presidio (for PII), custom Python scripts.
 *   **Database:** PostgreSQL (via SQLModel)
-*   **Frontend (M2):** Simple HTML/CSS/JS or a lightweight framework like HTMX or Vue/React if necessary.
+*   **Frontend (M2):** Simple HTML/CSS/JS or a lightweight framework like HTMX or Vue/React if necessary. (Currently React + Vite + Tailwind)
 *   **DevOps:** Docker, GitHub Actions, Pre-commit, Poetry.
 *   **Orchestration (Future):** Potentially LangGraph or a simple job queue like Celery if complexity grows.
 
@@ -80,12 +80,39 @@ poetry install
 cp .env.example .env
 # ... edit .env with your settings ...
 
-# Run database migrations (M2 onwards)
+# Run database migrations (M2 onwards for DB changes)
 # poetry run alembic upgrade head
 
 # Run the application (M2 onwards for UI)
-# poetry run uvicorn backend.main:app --reload
+# poetry run uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+# For the frontend dev server (if running separately):
+# cd frontend
+# pnpm dev # or npm run dev
 ```
+
+### Running Tests
+
+**Backend Tests (Pytest):**
+```bash
+poetry run pytest backend/tests
+```
+
+**Frontend E2E Tests (Playwright):**
+
+First, ensure Playwright's browsers are installed:
+```bash
+poetry run playwright install --with-deps
+# or from frontend directory: pnpm exec playwright install --with-deps
+```
+
+To run the E2E tests for the frontend:
+```bash
+# From the monorepo root:
+poetry run playwright test -c frontend/playwright.config.ts
+# Alternatively, if you are in the frontend directory:
+# pnpm exec playwright test
+```
+The tests will automatically start the frontend development server. Make sure the backend server (if E2E tests depend on it for API calls not mocked) is running if your tests hit live API endpoints. The current E2E tests use extensive API mocking and should run independently of the live backend.
 
 ## Contributing
 
