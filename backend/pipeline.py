@@ -8,6 +8,7 @@ from datetime import (
 from typing import Any, Dict, List, Optional, TypedDict
 
 # from .models import Client # If client_id needs to be validated against Client table as UUID
+import uuid # Import uuid module
 from uuid import UUID  # If client_id is expected to be UUID
 
 from docx import Document
@@ -28,7 +29,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, create_engine
 
 # Primary extractor
-from unstructured.partition.auto import partition_file
+from unstructured.partition import auto # Changed import
 
 from .models import (  # Assuming Role and RoleStatus are in models.py
     Role,
@@ -59,14 +60,21 @@ class GraphState(TypedDict):
     # Output from parse_roles_node
     roles_draft: Optional[List[Dict[str, Any]]]
 
+    # Output from sync_roles_node
+    synced_roles_count: Optional[int]
+
     # Error/status tracking
     error_message: Optional[str]  # Accumulates errors from all nodes
     current_node_error: Optional[str]  # For errors specific to the last run node
+    trace_id: Optional[str] # For LangSmith tracing
 
 
-def extract_text_from_file(file_path: str) -> str:
+def extract_text_from_file(file_path: str, current_trace_id: Optional[str] = None) -> str: # Added trace_id for logging
+    # Note: The print statements within this utility function are NOT modified to include trace_id
+    # as it's a generic utility. Trace ID logging is primarily for the main graph nodes.
+    # If detailed tracing within this function was needed, current_trace_id would be passed and used.
     if not os.path.exists(file_path):
-        print(f"Error: File not found at {file_path}")
+        print(f"Error: File not found at {file_path}") # Not prepending here
         raise FileNotFoundError(f"File not found: {file_path}")
 
     mime_type, _ = mimetypes.guess_type(file_path)
@@ -78,10 +86,11 @@ def extract_text_from_file(file_path: str) -> str:
         # Note: unstructured[local-inference] was removed due to space issues in previous setup.
         # This means partition_file might only work for basic types like .txt, .md, .html
         # unless it has other built-in parsers that don't rely on detectron2/torch.
+        # Not prepending trace_id to these print statements
         print(
             f"Attempting extraction with unstructured.io for {file_path} (MIME: {mime_type})"
         )
-        elements = partition_file(filename=file_path)
+        elements = auto.partition_file(filename=file_path) # Changed call
         text_content = "\n\n".join([el.text for el in elements if hasattr(el, "text")])
         if text_content.strip():
             extraction_method_used = "unstructured.io"
@@ -98,7 +107,7 @@ def extract_text_from_file(file_path: str) -> str:
 
     # Attempt 2: Fallbacks
     try:
-        print(f"Attempting fallback extraction for {file_path} (MIME: {mime_type})")
+        print(f"Attempting fallback extraction for {file_path} (MIME: {mime_type})") # Not prepending
         if mime_type == "application/pdf":
             with open(file_path, "rb") as f:
                 reader = PdfReader(f)
@@ -124,23 +133,23 @@ def extract_text_from_file(file_path: str) -> str:
                 text_content = f.read()
             extraction_method_used = "direct_read"
         else:
-            print(
+            print( # Not prepending
                 f"Unsupported file type for fallback: {mime_type} for file {file_path}"
             )
             # Not raising an error here, but returning empty string, node will report aggregate errors
             return ""
 
         if text_content.strip():
-            print(
+            print( # Not prepending
                 f"Successfully extracted text from {file_path} using fallback: {extraction_method_used}."
             )
         else:
-            print(
+            print( # Not prepending
                 f"Fallback ({extraction_method_used}) extracted no content from {file_path}."
             )
         return text_content
     except Exception as e:
-        print(f"Fallback extraction failed for {file_path}: {e}")
+        print(f"Fallback extraction failed for {file_path}: {e}") # Not prepending
         # Raise a specific error that can be caught by the node
         raise OSError(
             f"Failed to extract text from {file_path} using all methods (MIME: {mime_type}). Last error: {e}"
@@ -148,7 +157,8 @@ def extract_text_from_file(file_path: str) -> str:
 
 
 def extract_node(state: GraphState) -> Dict[str, Any]:
-    print("--- Running Extract Node ---")
+    current_trace_id = state.get("trace_id") or str(uuid.uuid4())
+    print(f"[Trace ID: {current_trace_id}] --- Running Extract Node ---")
     source_texts: List[str] = []
     resume_text: Optional[str] = (
         None  # Initialize to ensure it's always in the output dict
@@ -158,28 +168,28 @@ def extract_node(state: GraphState) -> Dict[str, Any]:
     try:
         resume_file_path = state.get("resume_file_path")
         if resume_file_path:  # Check if the key exists and is not None/empty
-            print(f"Extracting text from resume: {resume_file_path}")
+            print(f"[Trace ID: {current_trace_id}] Extracting text from resume: {resume_file_path}")
             try:
-                resume_text = extract_text_from_file(resume_file_path)
+                resume_text = extract_text_from_file(resume_file_path, current_trace_id)
             except Exception as e:
                 msg = f"Failed to extract resume '{resume_file_path}': {str(e)}"
-                print(msg)
+                print(f"[Trace ID: {current_trace_id}] {msg}")
                 current_node_error_messages.append(msg)
         else:
-            print("No resume_file_path provided or it's empty in state.")
+            print(f"[Trace ID: {current_trace_id}] No resume_file_path provided or it's empty in state.")
             # Depending on requirements, this might be an error or acceptable
             # current_node_error_messages.append("Resume file path was not provided.")
 
         source_doc_paths = state.get("source_document_paths", [])
-        print(f"Extracting text from {len(source_doc_paths)} source document(s).")
+        print(f"[Trace ID: {current_trace_id}] Extracting text from {len(source_doc_paths)} source document(s).")
         for doc_path in source_doc_paths:
-            print(f"Extracting from source document: {doc_path}")
+            print(f"[Trace ID: {current_trace_id}] Extracting from source document: {doc_path}")
             try:
-                text = extract_text_from_file(doc_path)
+                text = extract_text_from_file(doc_path, current_trace_id)
                 source_texts.append(text)
             except Exception as e:
                 msg = f"Failed to extract source document '{doc_path}': {str(e)}"
-                print(msg)
+                print(f"[Trace ID: {current_trace_id}] {msg}")
                 current_node_error_messages.append(msg)
                 source_texts.append(
                     ""
@@ -187,7 +197,7 @@ def extract_node(state: GraphState) -> Dict[str, Any]:
 
     except Exception as e:
         # Catch-all for unexpected errors within the node logic itself
-        print(f"Unexpected critical error in extract_node: {str(e)}")
+        print(f"[Trace ID: {current_trace_id}] Unexpected critical error in extract_node: {str(e)}")
         current_node_error_messages.append(
             f"A critical unexpected error occurred during text extraction: {str(e)}"
         )
@@ -216,6 +226,7 @@ def extract_node(state: GraphState) -> Dict[str, Any]:
     # even if their values are None or empty lists.
     # LangGraph merges this dict back into the main state.
     return {
+        "trace_id": current_trace_id,
         "source_document_texts": source_texts,
         "resume_text": resume_text,
         "error_message": final_accumulated_error,
@@ -224,7 +235,8 @@ def extract_node(state: GraphState) -> Dict[str, Any]:
 
 
 def parse_roles_node(state: GraphState) -> Dict[str, Any]:
-    print("--- Running Parse Roles Node ---")
+    current_trace_id = state.get("trace_id") or str(uuid.uuid4())
+    print(f"[Trace ID: {current_trace_id}] --- Running Parse Roles Node ---")
 
     current_node_error_output: Optional[str] = None
     roles_draft_output: List[Dict[str, Any]] = []  # Initialize to empty list
@@ -235,21 +247,22 @@ def parse_roles_node(state: GraphState) -> Dict[str, Any]:
     # error_message is the accumulated error from all previous nodes.
     if state.get("error_message") and not state.get("current_node_error"):
         print(
-            "Skipping Parse Roles Node due to pre-existing critical errors from other nodes."
+            f"[Trace ID: {current_trace_id}] Skipping Parse Roles Node due to pre-existing critical errors from other nodes."
         )
         return {
+            "trace_id": current_trace_id,
             "roles_draft": roles_draft_output,
             "current_node_error": None,
         }  # Return empty list, no new error from this node
 
     resume_text = state.get("resume_text")
     if not resume_text:
-        print("No resume text to parse for roles.")
+        print(f"[Trace ID: {current_trace_id}] No resume text to parse for roles.")
         current_node_error_output = "Cannot parse roles, resume text is missing."
         # roles_draft_output is already an empty list
     else:
         print(
-            f"Parsing roles from resume text (length: {len(resume_text)}) using model: {settings.OPENAI_MODEL_NAME}"
+            f"[Trace ID: {current_trace_id}] Parsing roles from resume text (length: {len(resume_text)}) using model: {settings.OPENAI_MODEL_NAME}"
         )
 
         client = OpenAI(api_key=settings.OPENAI_API_KEY)
@@ -279,7 +292,8 @@ JSON Output:
                 model=settings.OPENAI_MODEL_NAME,
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},
-                # Potential other parameters: temperature, max_tokens, etc.
+                temperature=0, # Added for deterministic output
+                # Potential other parameters: max_tokens, etc.
             )
 
             response_content = response.choices[0].message.content
@@ -291,14 +305,14 @@ JSON Output:
                 if "roles" in parsed_json and isinstance(parsed_json["roles"], list):
                     roles_draft_output = parsed_json["roles"]
                     print(
-                        f"Successfully parsed {len(roles_draft_output)} roles from LLM."
+                        f"[Trace ID: {current_trace_id}] Successfully parsed {len(roles_draft_output)} roles from LLM."
                     )
                 else:
                     current_node_error_output = "LLM output is valid JSON but does not contain a 'roles' list or 'roles' is not a list."
-                    print(current_node_error_output)
+                    print(f"[Trace ID: {current_trace_id}] {current_node_error_output}")
             else:
                 current_node_error_output = "LLM response content is empty."
-                print(current_node_error_output)
+                print(f"[Trace ID: {current_trace_id}] {current_node_error_output}")
 
         except APITimeoutError as e:
             current_node_error_output = f"OpenAI API timeout: {str(e)}"
@@ -318,7 +332,7 @@ JSON Output:
             )
 
         if current_node_error_output:
-            print(current_node_error_output)  # Print error specific to this attempt
+            print(f"[Trace ID: {current_trace_id}] {current_node_error_output}")  # Print error specific to this attempt
             roles_draft_output = []  # Ensure output is empty list on error
 
     # Accumulate errors for the graph state
@@ -334,6 +348,7 @@ JSON Output:
     # If this node ran successfully and there were no prior errors, final_accumulated_error remains None.
 
     return {
+        "trace_id": current_trace_id,
         "roles_draft": roles_draft_output,
         "error_message": final_accumulated_error,
         "current_node_error": current_node_error_output,  # Specific error from this run
@@ -373,6 +388,7 @@ def parse_date_string(date_str: Optional[str]) -> Optional[date]:
     except ValueError:
         pass
 
+    # Not prepending trace_id here as it's a utility function, and date parsing errors are more of data validation.
     print(
         f"Warning: Could not parse date string: '{date_str}' into a known date format (YYYY-MM-DD, YYYY-MM, Mon YYYY, YYYY). Returning None."
     )
@@ -380,7 +396,8 @@ def parse_date_string(date_str: Optional[str]) -> Optional[date]:
 
 
 def sync_roles_node(state: GraphState) -> Dict[str, Any]:
-    print("--- Running Sync Roles Node ---")
+    current_trace_id = state.get("trace_id") or str(uuid.uuid4())
+    print(f"[Trace ID: {current_trace_id}] --- Running Sync Roles Node ---")
 
     # Initialize outputs for this node
     current_node_error_output: Optional[str] = None
@@ -391,25 +408,38 @@ def sync_roles_node(state: GraphState) -> Dict[str, Any]:
         "current_node_error"
     ):  # Check for errors from *previous* nodes
         print(
-            "Skipping Sync Roles Node due to pre-existing critical errors in the graph."
+            f"[Trace ID: {current_trace_id}] Skipping Sync Roles Node due to pre-existing critical errors in the graph."
         )
+        # Preserve existing error_message, set current_node_error to None, and return synced_roles_count 0
         return {
-            "current_node_error": None
-        }  # This node didn't run, so no new error from it
+            "trace_id": current_trace_id,
+            "synced_roles_count": 0,
+            "error_message": state.get("error_message"),
+            "current_node_error": None,
+        }
 
     roles_to_sync = state.get("roles_draft")
+    # Initialize final_accumulated_error with any pre-existing error message from the state.
+    # This ensures that if the node exits early (e.g. no roles to sync), the original error isn't lost.
+    final_accumulated_error = state.get("error_message")
+
     if not roles_to_sync:  # Handles None or empty list
         msg = "No roles draft provided or roles draft is empty; nothing to sync."
-        print(msg)
-        # This is not necessarily an error for this node if the previous node correctly produced no roles.
-        # If it *should* have produced roles, that's an error from the previous node.
-        # We'll return normally, indicating 0 roles synced.
-        return {"synced_roles_count": 0, "current_node_error": None}
+        print(f"[Trace ID: {current_trace_id}] {msg}")
+        # Not an error for this node if previous node correctly produced no roles.
+        # current_node_error_output remains None.
+        # final_accumulated_error (from previous nodes, if any) is preserved.
+        return {
+            "trace_id": current_trace_id,
+            "synced_roles_count": 0,
+            "error_message": final_accumulated_error,
+            "current_node_error": None,
+        }
 
     client_id_str = state.get("client_id")
     if not client_id_str:
         current_node_error_output = "Client ID is missing in state, cannot sync roles."
-        print(current_node_error_output)
+        print(f"[Trace ID: {current_trace_id}] {current_node_error_output}")
     else:
         # Assuming client_id in the state is a string that needs to be UUID
         # This depends on how Client.id is defined in models.py
@@ -421,14 +451,14 @@ def sync_roles_node(state: GraphState) -> Dict[str, Any]:
             current_node_error_output = (
                 f"Invalid client_id format: '{client_id_str}'. Must be a valid UUID."
             )
-            print(current_node_error_output)
+            print(f"[Trace ID: {current_trace_id}] {current_node_error_output}")
             # client_id_for_role remains None, sync will be skipped
 
         if (
             client_id_for_role and not current_node_error_output
         ):  # Proceed if client_id is valid UUID
             print(
-                f"Attempting to sync {len(roles_to_sync)} roles for client_id: {client_id_for_role}"
+                f"[Trace ID: {current_trace_id}] Attempting to sync {len(roles_to_sync)} roles for client_id: {client_id_for_role}"
             )
 
             engine = create_engine(settings.DATABASE_URL)  # Create engine here
@@ -441,7 +471,7 @@ def sync_roles_node(state: GraphState) -> Dict[str, Any]:
                             "title"
                         ):
                             print(
-                                f"Skipping role due to missing company or title: {role_data}"
+                                f"[Trace ID: {current_trace_id}] Skipping role due to missing company or title: {role_data}"
                             )
                             continue
 
@@ -466,24 +496,23 @@ def sync_roles_node(state: GraphState) -> Dict[str, Any]:
                     session.commit()
                     synced_roles_count = len(roles_to_sync)  # Or count successful adds
                     print(
-                        f"Successfully synced {synced_roles_count} roles to DB for client_id: {client_id_for_role}."
+                        f"[Trace ID: {current_trace_id}] Successfully synced {synced_roles_count} roles to DB for client_id: {client_id_for_role}."
                     )
                     current_node_error_output = None  # Clear errors on success
 
             except SQLAlchemyError as e:
                 msg = f"Database error while syncing roles for client {client_id_for_role}: {str(e)}"
-                print(msg)
+                print(f"[Trace ID: {current_trace_id}] {msg}")
                 current_node_error_output = msg
                 # session.rollback() is implicitly handled by 'with Session' context manager on exception
             except (
                 Exception
             ) as e:  # Catch any other unexpected errors during DB interaction
                 msg = f"Unexpected error during database sync for client {client_id_for_role}: {str(e)}"
-                print(msg)
+                print(f"[Trace ID: {current_trace_id}] {msg}")
                 current_node_error_output = msg
 
-    # Accumulate errors for the graph state
-    final_accumulated_error = state.get("error_message")
+    # Accumulate current_node_error_output into final_accumulated_error
     if current_node_error_output:
         if final_accumulated_error:
             final_accumulated_error = (
@@ -493,6 +522,8 @@ def sync_roles_node(state: GraphState) -> Dict[str, Any]:
             final_accumulated_error = current_node_error_output
 
     return {
+        "trace_id": current_trace_id,
+        "synced_roles_count": synced_roles_count, # Always include synced_roles_count
         "error_message": final_accumulated_error,
         "current_node_error": current_node_error_output,
     }
@@ -512,13 +543,17 @@ workflow.set_entry_point("extract")
 
 
 def decide_next_node(state: GraphState) -> str:
+    # Fetches trace_id for logging, but decision logic doesn't change based on it.
+    # If trace_id is not set yet (e.g. error in the very first node before trace_id is set in its return),
+    # this part might not have it, but the node itself would have logged with a generated one.
+    current_trace_id = state.get("trace_id", "N/A_in_decide_next_node") # Default if not found
     if state.get("current_node_error"):
         print(
-            f"Error detected: {state['current_node_error']}. Ending graph or routing to error handler."
+            f"[Trace ID: {current_trace_id}] Error detected: {state['current_node_error']}. Ending graph or routing to error handler."
         )
         return END  # Or an error handling node name
     # Check specific conditions for routing if needed
-    print("No error in current node, proceeding.")
+    print(f"[Trace ID: {current_trace_id}] No error in current node, proceeding.")
     return "continue"  # A conventional name for the "success" path
 
 
@@ -570,14 +605,14 @@ app = workflow.compile()
 #     # Consider adding a small, simple PDF with text to the repo for testing.
 #     page = writer.add_blank_page(width=210, height=297)
 #     with open(pdf_path, "wb") as f: writer.write(f)
-#     print(f"Created dummy PDF: {pdf_path}")
+#     print(f"Created dummy PDF: {pdf_path}") # Not prepending trace_id, example code
 
 #     from docx import Document as DocxDoc # Ensure python-docx is installed
 #     doc = DocxDoc()
 #     doc.add_paragraph("This is a paragraph in a dummy docx file.")
 #     doc.add_paragraph("Another paragraph with some more text.")
 #     doc.save(docx_path)
-#     print(f"Created dummy DOCX: {docx_path}")
+#     print(f"Created dummy DOCX: {docx_path}") # Not prepending trace_id, example code
 
 
 #     initial_state = GraphState(
@@ -588,8 +623,10 @@ app = workflow.compile()
 #         source_document_texts=[],
 #         resume_text=None,
 #         roles_draft=None,
+#         synced_roles_count=None, # Added
 #         error_message=None,
-#         current_node_error=None
+#         current_node_error=None,
+#         trace_id=None # Added
 #     )
 
 #     # To run the graph (uncomment when graph is fully defined and compiled)
