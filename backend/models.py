@@ -47,7 +47,7 @@ class SourceDocument(SQLModel, table=True):
     uploaded_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc), nullable=False
     )
-    checksum: str
+    checksum: str = Field(unique=True)
 
     client: "Client" = Relationship(back_populates="source_documents")
 
