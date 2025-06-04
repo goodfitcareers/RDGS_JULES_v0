@@ -3,10 +3,10 @@ repos:
     rev: 24.4.0
     hooks:
     -   id: black
-        language_version: python3.11
+        language_version: python3.12
 -   repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.4.1
     hooks:
     -   id: ruff
         args: [--fix, --exit-non-zero-on-fix]
-        language_version: python3.11
+        language_version: python3.12

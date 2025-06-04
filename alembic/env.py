@@ -1,7 +1,5 @@
-from logging.config import fileConfig
 
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
+from sqlalchemy import engine_from_config, pool
 
 from alembic import context
 
@@ -12,13 +10,13 @@ config = context.config
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
 # if config.config_file_name is not None:  # Comment out if app handles logging
-    # fileConfig(config.config_file_name)
+# fileConfig(config.config_file_name)
 
 # Import settings and SQLModel metadata
-from backend.settings import settings
-from sqlmodel import SQLModel # Assuming all models are imported via backend.models
+from sqlmodel import SQLModel  # Assuming all models are imported via backend.models
+
 # Ensure all your models are imported so SQLModel.metadata is populated:
-import backend.models
+from backend.settings import settings
 
 # add your model's MetaData object here
 # for 'autogenerate' support
@@ -43,7 +41,7 @@ def run_migrations_offline() -> None:
 
     """
     # url = config.get_main_option("sqlalchemy.url") # Original
-    url = settings.DATABASE_URL # Use DATABASE_URL from settings
+    url = settings.DATABASE_URL  # Use DATABASE_URL from settings
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -75,7 +73,7 @@ def run_migrations_online() -> None:
     # This ensures that other settings from alembic.ini (if any) are still respected
     # while overriding the URL.
     engine_config = config.get_section(config.config_ini_section, {})
-    engine_config['sqlalchemy.url'] = db_url
+    engine_config["sqlalchemy.url"] = db_url
 
     connectable = engine_from_config(
         engine_config,
@@ -84,9 +82,7 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection, target_metadata=target_metadata
-        )
+        context.configure(connection=connection, target_metadata=target_metadata)
 
         with context.begin_transaction():
             context.run_migrations()
