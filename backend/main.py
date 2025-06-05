@@ -4,7 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, status
 from sqlmodel import (
     Session,
-    create_engine,
+    # create_engine, # Moved to dependencies
     select,
 )
 
@@ -39,15 +39,8 @@ from backend.services import export as export_service # Added for export
 # Import settings
 from backend.settings import settings
 
-# Database Setup
-DATABASE_URL = str(settings.DATABASE_URL)  # Ensure it's a string
-engine = create_engine(DATABASE_URL)  # echo=True for debugging SQL
-
-
-# Dependency to get DB session
-def get_db_session():
-    with Session(engine) as session:
-        yield session
+# Import engine and session getter from dependencies
+from backend.dependencies import get_db_session, engine
 
 
 # FastAPI Application Initialization
@@ -527,6 +520,9 @@ async def read_root():
 
 app.include_router(ingest_router)
 
+# Notion Router
+from backend.api import notion_router as notion_api_router
+app.include_router(notion_api_router.router, prefix="/api/v1/notion", tags=["Notion Integration"])
 
 # Export Router
 export_router = APIRouter(
@@ -586,5 +582,7 @@ app.include_router(export_router)
 # if __name__ == "__main__":
 #     import uvicorn
 #     # Create tables if they don't exist (for local dev only, Alembic handles migrations)
+#     # from backend.dependencies import engine # Corrected import for engine
+#     # from sqlmodel import SQLModel # Required for SQLModel.metadata
 #     # SQLModel.metadata.create_all(engine)
 #     uvicorn.run(app, host="0.0.0.0", port=8000)
