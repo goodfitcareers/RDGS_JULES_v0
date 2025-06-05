@@ -33,6 +33,7 @@ class Client(SQLModel, table=True):
 
     source_documents: List["SourceDocument"] = Relationship(back_populates="client")
     roles: List["Role"] = Relationship(back_populates="client")
+    export_audits: List["ExportAudit"] = Relationship(back_populates="client")
 
 
 class SourceDocument(SQLModel, table=True):
@@ -118,9 +119,22 @@ class ValidationNote(SQLModel, table=True):
     role: "Role" = Relationship()
 
 
+class ExportAudit(SQLModel, table=True):
+    __tablename__ = "export_audits"
+    id: UUID = Field(default_factory=uuid4, primary_key=True, index=True, nullable=False)
+    client_id: UUID = Field(foreign_key="clients.id", index=True, nullable=False)
+    exported_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), nullable=False)
+    row_count: int = Field(nullable=False)
+    filename: str = Field(nullable=False)
+    checksum: str = Field(nullable=False)  # SHA-256
+
+    client: "Client" = Relationship(back_populates="export_audits")
+
+
 # Update forward refs for all models
 Client.model_rebuild()
 SourceDocument.model_rebuild()
 Role.model_rebuild()
 EvidenceSnippet.model_rebuild()
 ValidationNote.model_rebuild()
+ExportAudit.model_rebuild()
