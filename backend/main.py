@@ -30,6 +30,11 @@ from backend.schemas import (
 )
 from datetime import datetime, timezone
 from fastapi import UploadFile, File # Added UploadFile, File
+from starlette.responses import StreamingResponse # Added for export
+import io # Added for export
+
+# Import services
+from backend.services import export as export_service # Added for export
 
 # Import settings
 from backend.settings import settings
@@ -519,6 +524,63 @@ async def read_root():
 # from .routers import roles_router, ingest_router # Hypothetical future routers
 # app.include_router(roles_router)
 # app.include_router(ingest_router)
+
+app.include_router(ingest_router)
+
+
+# Export Router
+export_router = APIRouter(
+    prefix="/api/export",
+    tags=["Export"],
+    responses={404: {"description": "Client or data not found for export"}},
+)
+
+@export_router.get("/{client_id}")
+async def export_client_data(
+    client_id: UUID,
+    db_session: Session = Depends(get_db_session),
+):
+    # Verify client exists
+    client = db_session.get(Client, client_id)
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    roles = export_service.get_validated_roles_for_client(client_id=client_id, db=db_session)
+    if not roles:
+        raise HTTPException(status_code=404, detail="No validated roles found for this client to export.")
+
+    jsonl_data = export_service.format_roles_to_jsonl(roles)
+    checksum = export_service.calculate_checksum(jsonl_data)
+
+    timestamp_str = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
+    filename = f"dataset-{client.display_name.replace(' ', '_')}-{client_id}-{timestamp_str}.jsonl"
+    row_count = len(roles)
+
+    export_service.create_export_audit_record(
+        db=db_session,
+        client_id=client_id,
+        row_count=row_count,
+        filename=filename,
+        checksum=checksum
+    )
+
+    content_bytes = jsonl_data.encode('utf-8')
+    stream = io.BytesIO(content_bytes)
+
+    headers = {
+        "Content-Disposition": f"attachment; filename=\"{filename}\"",
+        "X-Row-Count": str(row_count),
+        "X-Checksum": checksum,
+        "X-Filename": filename
+    }
+
+    return StreamingResponse(
+        content=stream,
+        media_type="application/jsonl",
+        headers=headers
+    )
+
+app.include_router(export_router)
 
 # For local development, if you want to run this file directly with uvicorn:
 # if __name__ == "__main__":
