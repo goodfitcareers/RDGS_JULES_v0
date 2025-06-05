@@ -31,7 +31,33 @@ jobs:
       - name: Run type checking
         run: poetry run mypy backend
       - name: Run tests
-        run: poetry run pytest -q --cov=backend --cov-report=xml
+        run: poetry run pytest -q --cov=backend --cov-report=xml --cov-report=term-missing
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install pnpm
+        run: npm install -g pnpm
+      - name: Install frontend dependencies
+        run: pnpm --filter frontend install
+      - name: Install Playwright browsers
+        run: pnpm --filter frontend exec playwright install --with-deps
+      - name: Build frontend
+        run: pnpm --filter frontend build
+      - name: Start backend server
+        run: poetry run uvicorn backend.main:app --host 0.0.0.0 --port 8000 &
+        env:
+          POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/test_db
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY_DUMMY }}
+      - name: Wait for backend server
+        run: |
+          timeout 60 bash -c 'until curl -s http://localhost:8000/healthz > /dev/null; do echo "Waiting for backend..."; sleep 1; done'
+          echo "Backend is up!"
+      - name: Run Playwright tests
+        run: pnpm --filter frontend exec playwright test
+        env:
+          VITE_API_BASE_URL: http://localhost:8000/api
+          CI: true
       # - name: Upload coverage to Codecov
       #   uses: codecov/codecov-action@v4
       #   with:
